@@ -1,0 +1,395 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Fruit Slice Mini</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: #101426; color: white;
+  font-family: system-ui, sans-serif; overflow: hidden;
+  touch-action: none; user-select: none;
+}
+#game {
+  display: block; width: 100vw; height: 100dvh;
+  touch-action: none;
+}
+#hud {
+  position: fixed; top: 18px; left: 0; right: 0;
+  display: flex; justify-content: space-around;
+  pointer-events: none; z-index: 2;
+}
+.stat {
+  background: #202843dd; padding: 10px 18px;
+  border: 1px solid #ffffff20; border-radius: 16px;
+  text-align: center; min-width: 88px;
+}
+.stat small { display: block; color: #aebbd9; font-size: 11px; letter-spacing: 2px; }
+.stat strong { font-size: 24px; }
+#overlay {
+  position: fixed; inset: 0; display: grid; place-items: center;
+  background: #0c1026a8; z-index: 5; padding: 20px;
+}
+.panel {
+  width: min(370px, 100%); padding: 30px 22px;
+  text-align: center; border-radius: 28px;
+  background: linear-gradient(145deg,#252e50,#151a30);
+  border: 1px solid #ffffff25;
+  box-shadow: 0 20px 70px #0008;
+}
+.logo { font-size: 66px; margin-bottom: 4px; }
+h1 { font-size: 34px; line-height: 1.1; margin: 6px 0 12px; }
+p { color: #c2cce5; line-height: 1.6; }
+button {
+  border: 0; border-radius: 15px; padding: 15px 30px;
+  font-size: 17px; font-weight: 800; color: #18213a;
+  background: linear-gradient(100deg,#b7ff78,#48e6b1);
+  cursor: pointer; width: 100%; margin-top: 12px;
+}
+#hint { font-size: 12px; color: #93a2c5; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div class="stat"><small>SCORE</small><strong id="score">0</strong></div>
+  <div class="stat"><small>BEST</small><strong id="best">0</strong></div>
+  <div class="stat"><small>LIVES</small><strong id="lives">❤️❤️❤️</strong></div>
+</div>
+
+<div id="overlay">
+  <div class="panel">
+    <div class="logo">🍉</div>
+    <h1 id="heading">FRUIT SLICE</h1>
+    <p id="message">Slice the fruit. Dodge the bombs. How high can you score?</p>
+    <button id="start">LET'S PLAY!</button>
+    <p id="hint">✦ Swipe or drag to slice fruit ✦</p>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const $ = id => document.getElementById(id);
+
+let W, H, dpr;
+let objects = [], particles = [], trail = [];
+let score = 0, lives = 3, best = 0;
+let playing = false, lastTime = 0, spawnTimer = 0;
+let elapsed = 0, shake = 0, pointerDown = false;
+let lastSpawnX = 0;
+
+try { best = Number(localStorage.getItem("fruitSliceBest")) || 0; } catch(e) {}
+$("best").textContent = best;
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+const fruits = [
+  { emoji:"🍉", color:"#ff5677", points:10 },
+  { emoji:"🍊", color:"#ffae42", points:10 },
+  { emoji:"🍎", color:"#ff475e", points:10 },
+  { emoji:"🍍", color:"#ffdc57", points:15 },
+  { emoji:"🍓", color:"#ff638e", points:15 },
+  { emoji:"🥝", color:"#8be06a", points:10 },
+  { emoji:"🍑", color:"#ffad9a", points:10 }
+];
+
+function random(min, max) { return Math.random() * (max-min) + min; }
+
+function burst(x, y, color, count=12) {
+  for (let i=0; i<count; i++) {
+    const a = random(0, Math.PI*2);
+    const speed = random(60, 240);
+    particles.push({
+      x,y, vx:Math.cos(a)*speed, vy:Math.sin(a)*speed,
+      life:random(.35,.75), max:.75,
+      size:random(2,6), color
+    });
+  }
+}
+
+function spawn() {
+  const bomb = Math.random() < Math.min(.13 + elapsed*.001, .24);
+  const r = random(24, 34);
+  let x = random(r+10, W-r-10);
+  if (W > 180 && Math.abs(x-lastSpawnX) < 55) {
+    x = Math.max(r+10, Math.min(W-r-10, x + (x < W/2 ? 85 : -85)));
+  }
+  lastSpawnX = x;
+
+  objects.push({
+    x, y:H+40, r,
+    vx:random(-100,100),
+    vy:-random(H*.72,H*1.03),
+    gravity:random(H*.95,H*1.18),
+    type:bomb ? "bomb" : "fruit",
+    fruit:fruits[Math.floor(Math.random()*fruits.length)],
+    rotation:random(-.5,.5),
+    spin:random(-3,3),
+    dead:false
+  });
+}
+
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0,0,W,H);
+  grad.addColorStop(0,"#101b36");
+  grad.addColorStop(1,"#241736");
+  ctx.fillStyle=grad;
+  ctx.fillRect(0,0,W,H);
+
+  ctx.save();
+  for(let i=0;i<32;i++){
+    const x=(i*137)%W;
+    const y=(i*211+elapsed*8)%H;
+    ctx.globalAlpha=.15+.15*Math.sin(elapsed+i);
+    ctx.fillStyle="#c8d6ff";
+    ctx.beginPath();
+    ctx.arc(x,y,1.5,0,Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  ctx.fillStyle="#0b1024";
+  for(let i=0;i<12;i++){
+    const bw=W/9;
+    const bh=40+(i*47%100);
+    ctx.fillRect(i*bw,H-bh,bw-3,bh);
+    ctx.fillStyle="#25304e";
+    for(let j=0;j<3;j++){
+      ctx.fillRect(i*bw+7+j*12,H-bh+10,5,6);
+    }
+    ctx.fillStyle="#0b1024";
+  }
+}
+
+function drawFruit(o) {
+  ctx.save();
+  ctx.translate(o.x,o.y);
+  ctx.rotate(o.rotation);
+
+  if(o.type==="bomb"){
+    ctx.shadowColor="#ff426b";
+    ctx.shadowBlur=18;
+    ctx.fillStyle="#252a3c";
+    ctx.beginPath();
+    ctx.arc(0,0,o.r*.85,0,Math.PI*2);
+    ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.strokeStyle="#8992ac";
+    ctx.lineWidth=3;
+    ctx.beginPath();
+    ctx.moveTo(4,-o.r*.7);
+    ctx.quadraticCurveTo(10,-o.r*1.25,19,-o.r*1.15);
+    ctx.stroke();
+    ctx.fillStyle="#ffb04b";
+    ctx.beginPath();
+    ctx.arc(20,-o.r*1.15,5,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle="white";
+    ctx.font=`${o.r*1.2}px sans-serif`;
+    ctx.textAlign="center";
+    ctx.textBaseline="middle";
+    ctx.fillText("✦",0,1);
+  } else {
+    ctx.shadowColor=o.fruit.color;
+    ctx.shadowBlur=14;
+    ctx.font=`${o.r*2}px serif`;
+    ctx.textAlign="center";
+    ctx.textBaseline="middle";
+    ctx.fillText(o.fruit.emoji,0,2);
+  }
+  ctx.restore();
+}
+
+function slice(o) {
+  o.dead=true;
+  if(o.type==="bomb"){
+    lives--;
+    shake=15;
+    $("lives").textContent="❤️".repeat(lives)+"🖤".repeat(3-lives);
+    burst(o.x,o.y,"#ff426b",24);
+    if(lives<=0) endGame();
+  } else {
+    score+=o.fruit.points;
+    $("score").textContent=score;
+    burst(o.x,o.y,o.fruit.color,14);
+    floatingText(o.x,o.y,"+"+o.fruit.points,o.fruit.color);
+  }
+}
+
+let texts=[];
+function floatingText(x,y,text,color){
+  texts.push({x,y,text,color,life:.7});
+}
+
+function pointSegmentDistance(px,py,x1,y1,x2,y2){
+  const dx=x2-x1, dy=y2-y1;
+  const len=dx*dx+dy*dy;
+  if(!len) return Math.hypot(px-x1,py-y1);
+  const t=Math.max(0,Math.min(1,((px-x1)*dx+(py-y1)*dy)/len));
+  return Math.hypot(px-(x1+t*dx),py-(y1+t*dy));
+}
+
+function cut(x,y){
+  if(!playing) return;
+  const prev=trail[trail.length-1];
+  trail.push({x,y,life:.18});
+  if(trail.length>8) trail.shift();
+  if(!prev) return;
+
+  for(const o of objects){
+    if(o.dead) continue;
+    if(pointSegmentDistance(o.x,o.y,prev.x,prev.y,x,y)<o.r*.85){
+      slice(o);
+    }
+  }
+}
+
+function position(e){
+  const rect=canvas.getBoundingClientRect();
+  return {x:e.clientX-rect.left,y:e.clientY-rect.top};
+}
+canvas.addEventListener("pointerdown",e=>{
+  pointerDown=true;
+  try { canvas.setPointerCapture(e.pointerId); } catch(err) {}
+  const p=position(e);
+  cut(p.x,p.y);
+});
+canvas.addEventListener("pointermove",e=>{
+  if(!pointerDown) return;
+  const p=position(e);
+  cut(p.x,p.y);
+});
+canvas.addEventListener("pointerup",()=>{pointerDown=false;});
+canvas.addEventListener("pointercancel",()=>{pointerDown=false;});
+
+function update(dt){
+  elapsed+=dt;
+  spawnTimer+=dt;
+  const interval=Math.max(.38,.85-elapsed*.003);
+  if(spawnTimer>interval){
+    spawnTimer=0;
+    spawn();
+    if(Math.random()<.22 && elapsed>5) spawn();
+  }
+
+  for(const o of objects){
+    if(o.dead) continue;
+    o.x+=o.vx*dt;
+    o.y+=o.vy*dt;
+    o.vy+=o.gravity*dt;
+    o.rotation+=o.spin*dt;
+    if(o.y>H+100) o.dead=true;
+  }
+  objects=objects.filter(o=>!o.dead);
+
+  for(const p of particles){
+    p.x+=p.vx*dt;
+    p.y+=p.vy*dt;
+    p.vy+=260*dt;
+    p.life-=dt;
+  }
+  particles=particles.filter(p=>p.life>0);
+
+  for(const t of trail) t.life-=dt;
+  trail=trail.filter(t=>t.life>0);
+  for(const t of texts){t.y-=40*dt;t.life-=dt;}
+  texts=texts.filter(t=>t.life>0);
+
+  shake=Math.max(0,shake-35*dt);
+}
+
+function draw(){
+  ctx.save();
+  if(shake>0) ctx.translate(random(-shake,shake),random(-shake,shake));
+  drawBackground();
+
+  for(const o of objects) drawFruit(o);
+
+  for(const p of particles){
+    ctx.globalAlpha=Math.max(0,p.life/p.max);
+    ctx.fillStyle=p.color;
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,p.size,0,Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  if(trail.length>1){
+    ctx.save();
+    ctx.lineCap="round";
+    ctx.lineJoin="round";
+    for(let i=1;i<trail.length;i++){
+      ctx.globalAlpha=i/trail.length;
+      ctx.strokeStyle="#a8fff1";
+      ctx.lineWidth=2+i*1.2;
+      ctx.shadowColor="#43ffe1";
+      ctx.shadowBlur=15;
+      ctx.beginPath();
+      ctx.moveTo(trail[i-1].x,trail[i-1].y);
+      ctx.lineTo(trail[i].x,trail[i].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  for(const t of texts){
+    ctx.globalAlpha=Math.max(0,t.life/.7);
+    ctx.font="bold 24px system-ui";
+    ctx.textAlign="center";
+    ctx.fillStyle=t.color;
+    ctx.fillText(t.text,t.x,t.y);
+  }
+  ctx.globalAlpha=1;
+  ctx.restore();
+}
+
+function loop(now){
+  const dt=Math.min((now-lastTime)/1000||0,.033);
+  lastTime=now;
+  if(playing) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function startGame(){
+  score=0; lives=3; elapsed=0;
+  spawnTimer=0; objects=[]; particles=[]; trail=[]; texts=[];
+  shake=0; playing=true; pointerDown=false;
+  $("score").textContent=0;
+  $("lives").textContent="❤️❤️❤️";
+  $("overlay").style.display="none";
+  lastTime=performance.now();
+}
+
+function endGame(){
+  if(!playing) return;
+  playing=false;
+  if(score>best){
+    best=score;
+    try { localStorage.setItem("fruitSliceBest",best); } catch(e) {}
+  }
+  $("best").textContent=best;
+  $("heading").textContent="GAME OVER";
+  $("message").textContent=`You scored ${score} points! Your best score is ${best}. Ready for another round?`;
+  $("start").textContent="PLAY AGAIN";
+  $("overlay").style.display="grid";
+}
+
+$("start").addEventListener("click",startGame);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
